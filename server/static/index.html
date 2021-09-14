@@ -1,57 +1,137 @@
 <html lang="en">
 <head>
-    <title>rtsp-bench</title>
+	<title>WebRTC media channels</title>
 </head>
-
+<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
 <body>
-<h3><a href="index.html">Video</a></h3>
-<div id="remoteVideos"></div>
-<br/>
-
-<div>
-    <button onclick="window.doSignaling(true)"> ICE Restart (reconnect)</button>
-</div>
-
-<h3> Logs </h3>
-<div id="logs"></div>
+	<div id="remoteVideos"></div>
+	<br />
+	<div>
+		<button onclick="window.addTrack()">Add track</button>
+	</div>
+	<h3> Logs </h3>
+	<div id="logs"></div>
 </body>
 
 <script>
-    let pc = new RTCPeerConnection()
-    pc.addTransceiver('video')
+	let trackCnt = 0;
+	var peerConnectionConfig = { iceServers:[ {urls:["stun:stun.l.google.com:19302"] }  ]};
+	let pc = new RTCPeerConnection(peerConnectionConfig);
+	const host="wss://black.ogsts.eu:8080/ws"
 
-    let log = msg => {
-        document.getElementById('logs').innerHTML += msg + '<br>'
-    }
-    pc.oniceconnectionstatechange = () => log(pc.iceConnectionState)
-    pc.ontrack = function (event) {
-        let el = document.createElement(event.track.kind)
-        el.srcObject = event.streams[0]
-        el.autoplay = true
-        el.controls = true
+	pc.onicecandidate = ({candidate}) => ioSend(candidate);
+	pc.oniceconnectionstatechange = () => log(pc.iceConnectionState)
+	pc.ontrack = (event) => {
+		trackCnt++;
+		log('Add track ' + trackCnt)
+		
+		let stream = new MediaStream();
+		stream.addTrack(event.track);
 
-        document.getElementById('remoteVideos').appendChild(el)
-    }
+		let e = document.createElement(event.track.kind)
+		e.srcObject = stream;//event.streams[0]
+		e.style.width = '600px';
+		e.setAttribute('autoplay','')
+		e.setAttribute('muted','')
+		e.setAttribute('playsInline','')
 
-    window.doSignaling = iceRestart => {
-        pc.createOffer({iceRestart})
-            .then(offer => {
-                pc.setLocalDescription(offer)
+		document.getElementById('remoteVideos').appendChild(e)
+		//el.play()
+	}
 
-                return fetch(`/doSignaling`, {
-                    method: 'post',
-                    headers: {
-                        'Accept': 'application/json, text/plain, */*',
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(offer)
-                })
-            })
-            .then(res => res.json())
-            .then(res => pc.setRemoteDescription(res))
-            .catch(alert)
-    }
+	pc.onnegotiationneeded = async () => {
+		log('#-> onnegotiationneeded ')
+		const offer = await pc.createOffer();
+		if (pc.signalingState != "stable") return;
+		await pc.setLocalDescription(offer);
+		ioSend(pc.localDescription);
+		log('<-# onnegotiationneeded ')
+	}
 
-    window.doSignaling(false)
+	let log = msg => {
+		document.getElementById('logs').innerHTML += msg + '<br>'
+	}
+
+	let ws = new WebSocket(host);
+	log("Attempting Connection...");
+
+
+	let ioSend = (content) => {
+		log(" SEND: " + JSON.stringify(content));
+		ws.send(JSON.stringify(content));
+	}
+
+	ws.onopen = () => {
+		log("Successfully Connected");
+	};
+
+	ws.onclose = event => {
+		log("Socket Closed Connection: ", event);
+		ws.send("Client Closed!")
+	};
+
+	ws.onerror = error => {
+		log("Socket Error: ", error);
+	};
+
+	ws.onmessage = async (event) => {
+		log('#-> ws.onmessage ');
+		log(event.data);
+		var msg = JSON.parse(event.data);
+
+		if (msg.type && msg.type == 'offer') {
+			log('    ws.onmessage() OFFER ');
+
+			if (pc.signalingState != "stable") {
+				log('    ws.onmessage() OFFER -> ROLLBACK ');
+				await Promise.all([
+					pc.setLocalDescription({type: "rollback"}),
+					pc.setRemoteDescription(msg)
+				]);
+			} else {
+				log('    ws.onmessage() setRemoteDescription ');
+				await pc.setRemoteDescription(msg);
+				log('    ws.onmessage() setRemoteDescription ');
+				const answer = await pc.createAnswer();
+				log('    ws.onmessage() setLocalDescription ');
+				await pc.setLocalDescription(answer);
+				ioSend(answer);
+			}
+			log('<-# ws.onmessage()');
+			return
+		}
+
+		if (msg.type && msg.type == 'answer') {
+			log('    ws.onmessage() ANSWER ');
+			await pc.setRemoteDescription(msg);
+			log('    ws.onmessage() ANSWER OK');
+			log('<-# ws.onmessage()');
+			return
+		}
+
+		if (msg.Candidate) {
+			log('    ws.onmessage() CANDIDATE ');
+			await pc.addIceCandidate(msg.Candidate)
+			log('<-# ws.onmessage()');
+			return
+		}
+		log('    ws.onmessage() UNKNOWN !');
+		log('<-# ws.onmessage()');
+	};
+
+	window.addTrack = async () => {
+		log('#-> addTrack()')
+		var result = await fetch(`/addTrack`, {
+			method: 'post',
+			headers: {
+				'Accept': 'application/json, text/plain, */*',
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({})
+		})
+		log('<-# addTrack() ' + JSON.stringify(result))
+	}
+
 </script>
+
 </html>
